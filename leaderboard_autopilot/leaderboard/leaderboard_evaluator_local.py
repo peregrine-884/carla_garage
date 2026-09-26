@@ -21,6 +21,7 @@ import os
 import sys
 import signal
 import socket
+import time
 import numpy as np
 import torch
 
@@ -98,6 +99,7 @@ class LeaderboardEvaluator(object):
         # Prepare the agent timer
         self._agent_watchdog = None
         signal.signal(signal.SIGINT, self._signal_handler)
+        signal.signal(signal.SIGTERM, self._signal_handler)
 
         self._client_timed_out = False
 
@@ -133,8 +135,6 @@ class LeaderboardEvaluator(object):
         """
         Remove and destroy all actors
         """
-        CarlaDataProvider.cleanup()
-
         if self._agent_watchdog:
             self._agent_watchdog.stop()
 
@@ -142,9 +142,12 @@ class LeaderboardEvaluator(object):
             if self.agent_instance:
                 self.agent_instance.destroy(results)
                 del self.agent_instance
+                self.agent_instance = None
         except Exception as e:
             print("\n\033[91mFailed to stop the agent:")
             print(f"\n{traceback.format_exc()}\033[0m")
+
+        self._cleanup_alive_sensors()
 
         if self.route_scenario:
             self.route_scenario.remove_all_actors()
@@ -156,11 +159,46 @@ class LeaderboardEvaluator(object):
             self._client_timed_out = not self.manager.get_running_status()
             self.manager.cleanup()
 
-        # Make sure no sensors are left streaming
-        alive_sensors = self.world.get_actors().filter('*sensor*')
+        CarlaDataProvider.cleanup()
+
+    def _cleanup_alive_sensors(self):
+        """
+        Stop callbacks before actor destruction so CARLA does not keep streaming
+        from sensors attached to actors that are being removed.
+        """
+        if self.world is None:
+            return
+
+        try:
+            alive_sensors = list(self.world.get_actors().filter('*sensor*'))
+        except Exception as e:
+            print("WARNING: failed to list alive sensors: {}".format(e))
+            return
+
         for sensor in alive_sensors:
-            sensor.stop()
-            sensor.destroy()
+            try:
+                if self._sensor_is_listening(sensor):
+                    sensor.stop()
+            except Exception as e:
+                print("WARNING: failed to stop sensor {}: {}".format(getattr(sensor, 'id', sensor), e))
+
+        try:
+            self.world.tick()
+        except Exception as e:
+            print("WARNING: failed to tick world after stopping alive sensors: {}".format(e))
+
+        for sensor in alive_sensors:
+            try:
+                if hasattr(sensor, 'is_alive') and not sensor.is_alive:
+                    continue
+                sensor.destroy()
+            except Exception as e:
+                print("WARNING: failed to destroy sensor {}: {}".format(getattr(sensor, 'id', sensor), e))
+
+        try:
+            self.world.tick()
+        except Exception as e:
+            print("WARNING: failed to tick world after destroying alive sensors: {}".format(e))
 
 
     def find_free_port(self, start_port=2_000, end_port=40_000):
@@ -224,7 +262,15 @@ class LeaderboardEvaluator(object):
         Load a new CARLA world without changing the settings and provide data to CarlaDataProvider
         """
 
-        self.world = self.client.load_world(town, reset_settings=False)
+        current_world = self.client.get_world()
+        loaded_town = current_world.get_map().name.split('/')[-1]
+        print(f"Loaded town: {loaded_town}, requested town: {town}")
+        if loaded_town != town:
+            self._clear_route_actors(current_world)
+            self.world = self.client.load_world(town, reset_settings=False)
+        else:
+            self.world = current_world
+            self._clear_route_actors(self.world)
 
         # Large Map settings are always reset, for some reason
         settings = self.world.get_settings()
@@ -251,6 +297,64 @@ class LeaderboardEvaluator(object):
         if map_name != town:
             raise Exception("The CARLA server uses the wrong map!"
                             " This scenario requires the use of map {}".format(town))
+
+    def _clear_route_actors(self, world):
+        """
+        Remove leftovers before a route/world reload without racing sensor callbacks.
+        """
+        if world is None:
+            return
+
+        try:
+            actors = list(world.get_actors())
+        except Exception as e:
+            print("WARNING: failed to list route actors before reload: {}".format(e))
+            return
+
+        sensors = [actor for actor in actors if actor.type_id.startswith('sensor.')]
+        destroyable = [
+            actor for actor in actors
+            if actor.type_id.startswith(('sensor.', 'vehicle.', 'walker.', 'controller.ai.walker'))
+        ]
+
+        for sensor in sensors:
+            try:
+                if self._sensor_is_listening(sensor):
+                    sensor.stop()
+            except Exception as e:
+                print("WARNING: failed to stop sensor {} before reload: {}".format(getattr(sensor, 'id', sensor), e))
+
+        if sensors:
+            time.sleep(0.05)
+            try:
+                world.tick()
+            except Exception as e:
+                print("WARNING: failed to tick world after stopping sensors before reload: {}".format(e))
+
+        batch = [
+            carla.command.DestroyActor(actor)
+            for actor in destroyable
+            if actor is not None and getattr(actor, 'is_alive', True)
+        ]
+        if batch:
+            try:
+                self.client.apply_batch_sync(batch, True)
+            except Exception as e:
+                print("WARNING: failed to destroy route actors before reload: {}".format(e))
+
+            try:
+                world.tick()
+            except Exception as e:
+                print("WARNING: failed to tick world after destroying route actors before reload: {}".format(e))
+
+    def _sensor_is_listening(self, sensor):
+        is_listening = getattr(sensor, 'is_listening', True)
+        if callable(is_listening):
+            try:
+                return is_listening()
+            except Exception:
+                return True
+        return bool(is_listening)
 
     def _register_statistics(self, route_date_string, route_index, entry_status, crash_message=""):
         """
@@ -281,6 +385,51 @@ class LeaderboardEvaluator(object):
         route_name = f"{config.name}_rep{config.repetition_index}"
         self.statistics_manager.create_route_data(route_name, config.index)
 
+        # The outer supervisor writes this marker before terminating an evaluator
+        # whose RSS exceeded the configured safety limit. On the clean restart,
+        # record every repetition of only that route as failed without loading it.
+        skip_marker = os.environ.get("ROUTE_EVALUATION_SKIP_ROUTE_FILE", "")
+        if skip_marker and os.path.isfile(skip_marker):
+            try:
+                with open(skip_marker, "r", encoding="utf-8") as marker_file:
+                    skipped_route = marker_file.readline().strip()
+            except OSError as error:
+                print("WARNING: failed to read route skip marker: {}".format(error))
+                skipped_route = ""
+
+            if skipped_route in ("*", config.name):
+                print(
+                    "\033[93mSkipping {} (repetition {}): evaluator memory "
+                    "limit was exceeded on this route.\033[0m".format(
+                        config.name, config.repetition_index
+                    )
+                )
+                route_date_string = datetime.now().strftime("%m_%d_%H_%M_%S")
+                self._register_statistics(
+                    route_date_string,
+                    config.index,
+                    "Started",
+                    "Evaluator memory limit exceeded",
+                )
+                if skipped_route == "*" or config.repetition_index >= args.repetitions - 1:
+                    try:
+                        os.unlink(skip_marker)
+                    except FileNotFoundError:
+                        pass
+                return False
+
+            # A graceful exit may have advanced the checkpoint after the marker
+            # was written. Never let a stale marker skip a different route.
+            print(
+                "WARNING: discarding stale route skip marker for {} while preparing {}".format(
+                    skipped_route, config.name
+                )
+            )
+            try:
+                os.unlink(skip_marker)
+            except FileNotFoundError:
+                pass
+
         print("\033[1m> Loading the world\033[0m")
 
         # Load the world and the scenario
@@ -290,14 +439,19 @@ class LeaderboardEvaluator(object):
             self.statistics_manager.set_scenario(self.route_scenario)
 
         except Exception:
-            # The scenario is wrong -> set the ejecution to crashed and stop
+            # A malformed scenario is local to this route. Record it and continue
+            # instead of making resume repeat the same route forever.
             print("\n\033[91mThe scenario could not be loaded:")
             print(f"\n{traceback.format_exc()}\033[0m")
 
-            entry_status, crash_message = FAILURE_MESSAGES["Simulation"]
-            self._register_statistics(config.index, entry_status, crash_message)
-            self._cleanup()
-            return True
+            entry_status = "Started"
+            crash_message = "Scenario setup failed"
+            route_date_string = datetime.now().strftime("%m_%d_%H_%M_%S")
+            result = self._register_statistics(
+                route_date_string, config.index, entry_status, crash_message
+            )
+            self._cleanup(result)
+            return False
 
         print("\033[1m> Setting up the agent\033[0m")
 
@@ -503,10 +657,19 @@ def main():
     pathlib.Path(arguments.checkpoint).parent.mkdir(parents=True, exist_ok=True)
 
     statistics_manager = StatisticsManager(arguments.checkpoint, arguments.debug_checkpoint)
-    leaderboard_evaluator = LeaderboardEvaluator(arguments, statistics_manager)
-    crashed = leaderboard_evaluator.run(arguments)
-
-    del leaderboard_evaluator
+    leaderboard_evaluator = None
+    crashed = True
+    try:
+        leaderboard_evaluator = LeaderboardEvaluator(arguments, statistics_manager)
+        crashed = leaderboard_evaluator.run(arguments)
+    finally:
+        if leaderboard_evaluator is not None:
+            try:
+                leaderboard_evaluator._cleanup()
+                leaderboard_evaluator._reset_world_settings()
+            except Exception:
+                traceback.print_exc()
+            del leaderboard_evaluator
 
     if crashed:
         sys.exit(-1)
@@ -517,6 +680,7 @@ def main():
 def main_eval(arguments):
     description = "CARLA AD Leaderboard Evaluation: evaluate your Agent in CARLA scenarios\n"
     statistics_manager = StatisticsManager()
+    leaderboard_evaluator = None
 
     try:
         leaderboard_evaluator = LeaderboardEvaluator(arguments, statistics_manager)
@@ -525,7 +689,13 @@ def main_eval(arguments):
     except Exception as e:
         traceback.print_exc()
     finally:
-        del leaderboard_evaluator
+        if leaderboard_evaluator is not None:
+            try:
+                leaderboard_evaluator._cleanup()
+                leaderboard_evaluator._reset_world_settings()
+            except Exception:
+                traceback.print_exc()
+            del leaderboard_evaluator
 
 if __name__ == '__main__':
     main()

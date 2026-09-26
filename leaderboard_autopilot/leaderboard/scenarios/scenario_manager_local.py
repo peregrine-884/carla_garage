@@ -70,6 +70,7 @@ class ScenarioManager(object):
 
         self._watchdog = None
         self._agent_watchdog = None
+        self._scenario_thread = None
 
         self._statistics_manager = statistics_manager
 
@@ -151,8 +152,8 @@ class ScenarioManager(object):
         self._running = True
 
         # Thread for build_scenarios
-        t = threading.Thread(target=self.build_scenarios_loop, args=(self._debug_mode > 0, ))
-        t.start()
+        self._scenario_thread = threading.Thread(target=self.build_scenarios_loop, args=(self._debug_mode > 0, ))
+        self._scenario_thread.start()
 
         while self._running:
             self._tick_scenario()
@@ -246,6 +247,10 @@ class ScenarioManager(object):
         """
         This function triggers a proper termination of a scenario
         """
+        self._running = False
+        if self._scenario_thread is not None and self._scenario_thread.is_alive():
+            self._scenario_thread.join()
+
         if self._watchdog:
             self._watchdog.stop()
 

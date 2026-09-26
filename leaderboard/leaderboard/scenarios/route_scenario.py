@@ -490,5 +490,16 @@ class RouteScenario(BasicScenario):
         """
         Remove all actors upon deletion
         """
-        self.client.apply_batch([carla.command.DestroyActor(x) for x in self._parked_ids])
-        self.remove_all_actors()
+        try:
+            if self.client and self._parked_ids:
+                self.client.apply_batch_sync([carla.command.DestroyActor(x) for x in self._parked_ids], True)
+                self._parked_ids = []
+                if self.world is not None:
+                    self.world.tick()
+        except Exception as e:
+            print("WARNING: failed to destroy parked vehicles during route cleanup: {}".format(e))
+
+        try:
+            self.remove_all_actors()
+        except Exception as e:
+            print("WARNING: failed to remove route actors during route cleanup: {}".format(e))

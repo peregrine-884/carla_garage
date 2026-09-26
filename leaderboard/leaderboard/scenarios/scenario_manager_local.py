@@ -247,6 +247,10 @@ class ScenarioManager(object):
         """
         This function triggers a proper termination of a scenario
         """
+        self._running = False
+        if self._scenario_thread is not None and self._scenario_thread.is_alive():
+            self._scenario_thread.join()
+
         if self._watchdog:
             self._watchdog.stop()
 
@@ -264,10 +268,6 @@ class ScenarioManager(object):
                 self._agent_wrapper = None
 
             self.analyze_scenario()
-
-        # Make sure the scenario thread finishes to avoid blocks
-        self._running = False
-        self._scenario_thread.join()
         self._scenario_thread = None
 
     def compute_duration_time(self):

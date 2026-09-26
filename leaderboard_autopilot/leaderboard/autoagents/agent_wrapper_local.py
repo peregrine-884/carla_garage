@@ -24,11 +24,118 @@ from leaderboard.autoagents.ros_base_agent import ROSBaseAgent
 
 DATAGEN = int(os.environ.get('DATAGEN', 0))
 
+DATASET_COLLECTION_ENV_VAR = 'CARLA_RAW_COLLECTION'
+COLLECTION_SENSOR_ATTRIBUTES = {
+    'sensor.camera': {
+        'width': 'image_size_x',
+        'height': 'image_size_y',
+        'fov': 'fov',
+        'sensor_tick': 'sensor_tick',
+    },
+    'sensor.lidar.ray_cast': {
+        'range': 'range',
+        'rotation_frequency': 'rotation_frequency',
+        'channels': 'channels',
+        'upper_fov': 'upper_fov',
+        'lower_fov': 'lower_fov',
+        'horizontal_fov': 'horizontal_fov',
+        'points_per_second': 'points_per_second',
+        'sensor_tick': 'sensor_tick',
+    },
+    'sensor.other.radar': {
+        'range': 'range',
+        'horizontal_fov': 'horizontal_fov',
+        'vertical_fov': 'vertical_fov',
+        'points_per_second': 'points_per_second',
+        'sensor_tick': 'sensor_tick',
+    },
+    'sensor.other.gnss': {'sensor_tick': 'sensor_tick'},
+    'sensor.other.imu': {'sensor_tick': 'sensor_tick'},
+}
+
+
+def _is_dataset_collection():
+    """Read the mode at use time so import order cannot freeze its value."""
+    return os.environ.get(DATASET_COLLECTION_ENV_VAR, '0') == '1'
+
+
+def _collection_attribute_map(sensor_type):
+    if sensor_type.startswith('sensor.camera'):
+        return COLLECTION_SENSOR_ATTRIBUTES['sensor.camera']
+    return COLLECTION_SENSOR_ATTRIBUTES.get(sensor_type, {})
+
+
+def _requested_collection_attributes(sensor_spec):
+    mapping = _collection_attribute_map(sensor_spec['type'])
+    return {
+        target: str(sensor_spec[source])
+        for source, target in mapping.items()
+        if source in sensor_spec
+    }
+
+
+def _carla_attribute_value(attribute):
+    """Return a JSON-safe ActorAttribute value instead of its debug repr."""
+    attribute_type = getattr(attribute, 'type', None)
+    carla_attribute_type = getattr(carla, 'ActorAttributeType', None)
+    converters = []
+    if carla_attribute_type is not None:
+        converters = [
+            (getattr(carla_attribute_type, 'Bool', None), 'as_bool'),
+            (getattr(carla_attribute_type, 'Int', None), 'as_int'),
+            (getattr(carla_attribute_type, 'Float', None), 'as_float'),
+            (getattr(carla_attribute_type, 'String', None), 'as_str'),
+        ]
+    for expected_type, method_name in converters:
+        if expected_type is not None and attribute_type == expected_type:
+            return getattr(attribute, method_name)()
+
+    # Keep compatibility with CARLA builds or test doubles that do not expose
+    # ActorAttributeType. as_str() returns the stored value, unlike str(), which
+    # formats the complete ActorAttribute debug representation in CARLA 0.9.16.
+    try:
+        return attribute.as_str()
+    except (AttributeError, RuntimeError, TypeError, ValueError):
+        value = getattr(attribute, 'value', None)
+        if value is not None:
+            return value
+        raise SensorConfigurationInvalid(
+            "Could not read CARLA ActorAttribute value: {!r}".format(attribute))
+
+
+def _attribute_values_match(requested, effective):
+    if isinstance(effective, bool):
+        if isinstance(requested, bool):
+            return requested is effective
+        if isinstance(requested, str):
+            normalized = requested.strip().lower()
+            if normalized in ('true', '1'):
+                return effective is True
+            if normalized in ('false', '0'):
+                return effective is False
+        return False
+    if isinstance(effective, int):
+        try:
+            return int(requested) == effective
+        except (TypeError, ValueError):
+            return False
+    if isinstance(effective, float):
+        try:
+            return math.isclose(float(requested), effective, rel_tol=1e-9, abs_tol=1e-9)
+        except (TypeError, ValueError):
+            return False
+    if requested == effective:
+        return True
+    try:
+        return math.isclose(float(requested), float(effective), rel_tol=1e-9, abs_tol=1e-9)
+    except (TypeError, ValueError):
+        return False
+
 MAX_ALLOWED_RADIUS_SENSOR = 3.0
 QUALIFIER_SENSORS_LIMITS = {
-    'sensor.camera.rgb': 4,
+    'sensor.camera.rgb': 6,
     'sensor.lidar.ray_cast': 1,
-    'sensor.other.radar': 2,
+    'sensor.other.radar': 5,
     'sensor.other.gnss': 1,
     'sensor.other.imu': 1,
     'sensor.opendrive_map': 1,
@@ -96,7 +203,11 @@ def validate_sensor_configuration(sensors, agent_track, selected_track):
                 raise SensorConfigurationInvalid("Illegal sensor 'sensor.opendrive_map' used for Track [{}]!".format(agent_track))
 
         # Check the sensors validity
-        if sensor['type'] not in ALLOWED_SENSORS:
+        collection_only_sensor = (
+            _is_dataset_collection()
+            and sensor['type'] == 'sensor.camera.instance_segmentation'
+        )
+        if sensor['type'] not in ALLOWED_SENSORS and not collection_only_sensor:
             raise SensorConfigurationInvalid("Illegal sensor '{}' used for Track [{}]!".format(sensor['type'], agent_track))
 
         # Check the extrinsics of the sensor
@@ -139,6 +250,9 @@ class AgentWrapper(object):
         Set the autonomous agent
         """
         self._agent = agent
+        self._sensors_list = []
+        self.sensor_list_names = []
+        self._cleanup_done = False
 
     def __call__(self):
         """
@@ -236,6 +350,16 @@ class AgentWrapper(object):
             sensor_rotation = carla.Rotation(pitch=sensor_spec['pitch'],
                                              roll=sensor_spec['roll'],
                                              yaw=sensor_spec['yaw'])
+
+        if _is_dataset_collection():
+            requested_attributes = _requested_collection_attributes(sensor_spec)
+            if type_ == 'sensor.lidar.ray_cast':
+                missing = set(COLLECTION_SENSOR_ATTRIBUTES[type_].values()) - set(requested_attributes)
+                if missing:
+                    raise SensorConfigurationInvalid(
+                        "Dataset collection LiDAR spec is missing CARLA attributes: {}".format(
+                            ', '.join(sorted(missing))))
+            attributes.update(requested_attributes)
         sensor_transform = carla.Transform(sensor_location, sensor_rotation)
 
         return type_, id_, sensor_transform, attributes
@@ -248,6 +372,7 @@ class AgentWrapper(object):
         """
         world = CarlaDataProvider.get_world()
         bp_library = world.get_blueprint_library()
+        effective_configs = []
         for sensor_spec in self._agent.sensors():
             type_, id_, sensor_transform, attributes = self._preprocess_sensor_spec(sensor_spec)
 
@@ -261,13 +386,45 @@ class AgentWrapper(object):
             else:
                 bp = bp_library.find(type_)
                 for key, value in attributes.items():
+                    if not bp.has_attribute(str(key)):
+                        raise SensorConfigurationInvalid(
+                            "CARLA blueprint {} does not support requested attribute {}".format(type_, key))
                     bp.set_attribute(str(key), str(value))
+
+                if _is_dataset_collection():
+                    requested_attributes = _requested_collection_attributes(sensor_spec)
+                    effective_attributes = {
+                        key: _carla_attribute_value(bp.get_attribute(str(key)))
+                        for key in attributes
+                    }
+                    mismatches = {
+                        key: (requested, effective_attributes.get(key))
+                        for key, requested in requested_attributes.items()
+                        if not _attribute_values_match(requested, effective_attributes.get(key))
+                    }
+                    if mismatches:
+                        raise SensorConfigurationInvalid(
+                            "Dataset collection sensor {} effective attributes differ from requested: {}".format(
+                                id_, mismatches))
+                    effective_configs.append({
+                        'id': id_,
+                        'type': type_,
+                        'requested_carla_attributes': requested_attributes,
+                        'effective_carla_attributes': effective_attributes,
+                    })
+                    if type_ == 'sensor.lidar.ray_cast':
+                        ordered_keys = COLLECTION_SENSOR_ATTRIBUTES[type_].values()
+                        print('[LIDAR effective config] {}'.format(' '.join(
+                            '{}={}'.format(key, effective_attributes[key]) for key in ordered_keys)))
                 sensor = CarlaDataProvider.get_world().spawn_actor(bp, sensor_transform, vehicle)
 
             # setup callback
             sensor.listen(CallBack(id_, type_, sensor, self._agent.sensor_interface))
             self._sensors_list.append(sensor)
             self.sensor_list_names.append([sensor_spec['id'], sensor])
+
+        if effective_configs and hasattr(self._agent, 'record_effective_sensor_configs'):
+            self._agent.record_effective_sensor_configs(effective_configs)
 
         # Some sensors miss sending data during the first ticks, so tick several times and remove the data
         for _ in range(10):
@@ -277,17 +434,47 @@ class AgentWrapper(object):
         """
         Remove and destroy all sensors
         """
-        for i, _ in enumerate(self._sensors_list):
-            if self._sensors_list[i] is not None:
-                self._sensors_list[i].stop()
-                self._sensors_list[i].destroy()
-                self._sensors_list[i] = None
+        if self._cleanup_done:
+            return
+        self._cleanup_done = True
+
+        sensors = list(self._sensors_list)
+
+        for sensor in sensors:
+            if sensor is None:
+                continue
+            try:
+                sensor.stop()
+            except Exception as e:
+                print("WARNING: failed to stop sensor {}: {}".format(getattr(sensor, 'id', sensor), e))
+
+        time.sleep(0.05)
+        world = CarlaDataProvider.get_world()
+        if world is not None:
+            try:
+                world.tick()
+            except Exception as e:
+                print("WARNING: failed to tick world after stopping sensors: {}".format(e))
+
+        for sensor in sensors:
+            if sensor is None:
+                continue
+            try:
+                if hasattr(sensor, 'is_alive') and not sensor.is_alive:
+                    continue
+                sensor.destroy()
+            except Exception as e:
+                print("WARNING: failed to destroy sensor {}: {}".format(getattr(sensor, 'id', sensor), e))
 
         self._sensors_list.clear()
         self.sensor_list_names.clear()
 
         # Tick once to destroy the sensors
-        CarlaDataProvider.get_world().tick()
+        if world is not None:
+            try:
+                world.tick()
+            except Exception as e:
+                print("WARNING: failed to tick world after destroying sensors: {}".format(e))
 
 
 class ROSAgentWrapper(AgentWrapper):
@@ -320,11 +507,23 @@ class ROSAgentWrapper(AgentWrapper):
         CarlaDataProvider.get_world().tick()
 
     def cleanup(self):
+        if self._cleanup_done:
+            return
+        self._cleanup_done = True
+
         for uid in self._sensors_list:
-            self._agent.destroy_object(uid)
+            try:
+                self._agent.destroy_object(uid)
+            except Exception as e:
+                print("WARNING: failed to destroy ROS sensor {}: {}".format(uid, e))
         self._sensors_list.clear()
 
         # Tick once to destroy the sensors
-        CarlaDataProvider.get_world().tick()
+        world = CarlaDataProvider.get_world()
+        if world is not None:
+            try:
+                world.tick()
+            except Exception as e:
+                print("WARNING: failed to tick world after destroying ROS sensors: {}".format(e))
         self._sensors_list.clear()
         self.sensor_list_names.clear()

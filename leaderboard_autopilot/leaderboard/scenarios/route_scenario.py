@@ -12,6 +12,7 @@ This module provides Challenge routes as standalone scenarios
 from __future__ import print_function
 
 import glob
+import json
 import os
 import sys
 import importlib
@@ -119,7 +120,84 @@ class RouteScenario(BasicScenario):
 
         # Prepare route's trajectory (interpolate and add the GPS route)
         self.gps_route, self.route = interpolate_trajectory(config.keypoints)
+        self._save_interpolated_route(config)
         return self.route
+
+    def _save_interpolated_route(self, config):
+        """Save the dense route used by the route scenario for downstream validation."""
+        run_info_dir = os.environ.get("RUN_INFO_DIR")
+        if not run_info_dir:
+            return
+
+        def serialize_transform(transform):
+            return {
+                "location": {
+                    "x": float(transform.location.x),
+                    "y": float(transform.location.y),
+                    "z": float(transform.location.z),
+                },
+                "rotation": {
+                    "roll": float(transform.rotation.roll),
+                    "pitch": float(transform.rotation.pitch),
+                    "yaw": float(transform.rotation.yaw),
+                },
+            }
+
+        def road_option_name(option):
+            return getattr(option, "name", str(option))
+
+        scenario_records = []
+        for scenario_config in config.scenario_configs:
+            scenario_records.append({
+                "name": scenario_config.name,
+                "type": scenario_config.type,
+                "trigger_points": [
+                    serialize_transform(trigger_point)
+                    for trigger_point in scenario_config.trigger_points
+                ],
+                "other_parameters": dict(getattr(scenario_config, "other_parameters", {})),
+            })
+
+        payload = {
+            "town": config.town,
+            "name": config.name,
+            "keypoints": [
+                {
+                    "x": float(location.x),
+                    "y": float(location.y),
+                    "z": float(location.z),
+                }
+                for location in config.keypoints
+            ],
+            "route": [
+                {
+                    "index": index,
+                    "road_option": road_option_name(road_option),
+                    **serialize_transform(transform),
+                }
+                for index, (transform, road_option) in enumerate(self.route)
+            ],
+            "gps_route": [
+                {
+                    "index": index,
+                    "road_option": road_option_name(road_option),
+                    "gps": {
+                        "lat": float(gps_point["lat"]),
+                        "lon": float(gps_point["lon"]),
+                        "z": float(gps_point["z"]),
+                    },
+                }
+                for index, (gps_point, road_option) in enumerate(self.gps_route)
+            ],
+            "scenarios": scenario_records,
+        }
+
+        try:
+            os.makedirs(run_info_dir, exist_ok=True)
+            with open(os.path.join(run_info_dir, "interpolated_route.json"), "w", encoding="utf-8") as route_file:
+                json.dump(payload, route_file, indent=2)
+        except OSError as exc:
+            print(f"WARNING: Failed to save interpolated route: {exc}")
 
     def _filter_scenarios(self, scenario_configs):
         """
@@ -146,7 +224,7 @@ class RouteScenario(BasicScenario):
         elevate_transform = self.route[0][0]
         elevate_transform.location.z += 0.5
 
-        ego_vehicle = CarlaDataProvider.request_new_actor('vehicle.lincoln.mkz_2020',
+        ego_vehicle = CarlaDataProvider.request_new_actor('vehicle.nissan.micra',
                                                           elevate_transform,
                                                           rolename='hero')
         if not ego_vehicle:
@@ -490,5 +568,16 @@ class RouteScenario(BasicScenario):
         """
         Remove all actors upon deletion
         """
-        self.client.apply_batch([carla.command.DestroyActor(x) for x in self._parked_ids])
-        self.remove_all_actors()
+        try:
+            if self.client and self._parked_ids:
+                self.client.apply_batch_sync([carla.command.DestroyActor(x) for x in self._parked_ids], True)
+                self._parked_ids = []
+                if self.world is not None:
+                    self.world.tick()
+        except Exception as e:
+            print("WARNING: failed to destroy parked vehicles during route cleanup: {}".format(e))
+
+        try:
+            self.remove_all_actors()
+        except Exception as e:
+            print("WARNING: failed to remove route actors during route cleanup: {}".format(e))
