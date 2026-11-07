@@ -11,6 +11,7 @@ It must not be modified and is for reference only!
 """
 
 from __future__ import print_function
+import logging
 import signal
 import sys
 import time
@@ -89,12 +90,24 @@ class ScenarioManager(object):
         """
         Reset all parameters
         """
+        self._running = False
+        self._cleanup_agent()
         self._timestamp_last_run = 0.0
         self.scenario_duration_system = 0.0
         self.scenario_duration_game = 0.0
         self.start_system_time = None
         self.end_system_time = None
         self.end_game_time = None
+
+    def _cleanup_agent(self):
+        """Release sensors even after a watchdog or scenario setup failure."""
+        agent = self._agent
+        self._agent = None
+        if agent is not None:
+            try:
+                agent.cleanup()
+            except Exception as error:
+                logging.warning("Failed to clean up agent sensors: %s", error)
 
     def load_scenario(self, scenario, agent, rep_number):
         """
@@ -204,14 +217,13 @@ class ScenarioManager(object):
         self.scenario_duration_system = self.end_system_time - self.start_system_time
         self.scenario_duration_game = self.end_game_time - self.start_game_time
 
-        if self.get_running_status():
-            if self.scenario is not None:
+        try:
+            if self.get_running_status() and self.scenario is not None:
                 self.scenario.terminate()
+        finally:
+            self._cleanup_agent()
 
-            if self._agent is not None:
-                self._agent.cleanup()
-                self._agent = None
-
+        if self.get_running_status():
             self.analyze_scenario()
 
     def analyze_scenario(self):

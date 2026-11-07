@@ -10,6 +10,7 @@ Wrapper for autonomous agents required for tracking and checking of used sensors
 """
 
 from __future__ import print_function
+import logging
 import math
 import os
 
@@ -37,6 +38,11 @@ SENSORS_LIMITS = {
     'sensor.camera.depth': 4, # for data generation
     'sensor.camera.semantic_segmentation': 4 # for data generation
 }
+
+RESEARCH_CAMERA_IDS = (
+    'CAM_FRONT', 'CAM_FRONT_RIGHT', 'CAM_FRONT_LEFT',
+    'CAM_BACK', 'CAM_BACK_LEFT', 'CAM_BACK_RIGHT',
+)
 
 
 class AgentError(Exception):
@@ -68,15 +74,14 @@ class AgentWrapper(object):
         'sensor.camera.semantic_segmentation', # for data generation
     ]
 
-    _agent = None
-    _sensors_list = []
-    sensor_list_names = []
-
     def __init__(self, agent):
         """
         Set the autonomous agent
         """
         self._agent = agent
+        self._sensors_list = []
+        self.sensor_list_names = []
+        self._cleanup_done = False
 
     def __call__(self):
         """
@@ -183,25 +188,38 @@ class AgentWrapper(object):
                                                      roll=sensor_spec['roll'],
                                                      yaw=sensor_spec['yaw'])
                 # create sensor
+                if 'sensor_tick' in sensor_spec:
+                    bp.set_attribute('sensor_tick', str(sensor_spec['sensor_tick']))
                 sensor_transform = carla.Transform(sensor_location, sensor_rotation)
                 sensor = CarlaDataProvider.get_world().spawn_actor(bp, sensor_transform, vehicle)
             # setup callback
-            sensor.listen(CallBack(sensor_spec['id'], sensor_spec['type'], sensor, self._agent.sensor_interface))
+            # Track the sensor before callback registration so setup failures can clean it up.
             self._sensors_list.append(sensor)
             self.sensor_list_names.append([sensor_spec['id'], sensor])
+            sensor.listen(CallBack(sensor_spec['id'], sensor_spec['type'], sensor, self._agent.sensor_interface))
 
         # Tick once to spawn the sensors
         CarlaDataProvider.get_world().tick()
 
 
     @staticmethod
-    def validate_sensor_configuration(sensors, agent_track, selected_track):
+    def validate_sensor_configuration(sensors, agent_track, selected_track, research_six_camera=False):
         """
         Ensure that the sensor configuration is valid, in case the challenge mode is used
         Returns true on valid configuration, false otherwise
         """
         if Track(selected_track) != agent_track:
             raise SensorConfigurationInvalid("You are submitting to the wrong track [{}]!".format(Track(selected_track)))
+
+        limits = SENSORS_LIMITS
+        if research_six_camera:
+            if research_six_camera is not True:
+                raise SensorConfigurationInvalid("Research mode must be explicitly enabled with a boolean flag")
+            camera_ids = tuple(sensor['id'] for sensor in sensors if sensor['type'] == 'sensor.camera.rgb')
+            if camera_ids != RESEARCH_CAMERA_IDS:
+                raise SensorConfigurationInvalid("Research mode requires the existing VADv2 six-camera order")
+            limits = dict(SENSORS_LIMITS)
+            limits['sensor.camera.rgb'] = 6
 
         sensor_count = {}
         sensor_ids = []
@@ -237,7 +255,7 @@ class AgentWrapper(object):
                 sensor_count[sensor['type']] = 1
 
 
-        for sensor_type, max_instances_allowed in SENSORS_LIMITS.items():
+        for sensor_type, max_instances_allowed in limits.items():
             if sensor_type in sensor_count and sensor_count[sensor_type] > max_instances_allowed:
                 raise SensorConfigurationInvalid(
                     "Too many {} used! "
@@ -249,10 +267,22 @@ class AgentWrapper(object):
         """
         Remove and destroy all sensors
         """
-        for i, _ in enumerate(self._sensors_list):
-            if self._sensors_list[i] is not None:
-                self._sensors_list[i].stop()
-                self._sensors_list[i].destroy()
-                self._sensors_list[i] = None
-        self._sensors_list.clear()
-        self.sensor_list_names.clear()
+        if self._cleanup_done:
+            return
+        self._cleanup_done = True
+
+        try:
+            for sensor in self._sensors_list:
+                if sensor is None:
+                    continue
+                try:
+                    sensor.stop()
+                except Exception as error:
+                    logging.warning("Failed to stop sensor %r: %s", sensor, error)
+                try:
+                    sensor.destroy()
+                except Exception as error:
+                    logging.warning("Failed to destroy sensor %r: %s", sensor, error)
+        finally:
+            self._sensors_list.clear()
+            self.sensor_list_names.clear()

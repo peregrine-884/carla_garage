@@ -35,6 +35,7 @@ from leaderboard.envs.sensor_interface import SensorConfigurationInvalid
 from leaderboard.autoagents.agent_wrapper_local import  AgentWrapper, AgentError
 from leaderboard.utils.statistics_manager_local import StatisticsManager
 from leaderboard.utils.route_indexer import RouteIndexer
+from leaderboard.utils.research_metadata import save_research_metadata
 
 import pathlib
 
@@ -73,6 +74,8 @@ class LeaderboardEvaluator(object):
         self.statistics_manager = statistics_manager
         self.sensors = None
         self.sensor_icons = []
+        self.research_six_camera = getattr(args, 'research_six_camera', False)
+        self.research_agent_metadata = None
         self._vehicle_lights = carla.VehicleLightState.Position | carla.VehicleLightState.LowBeam
 
         # First of all, we need to create the client that will send the requests
@@ -228,7 +231,7 @@ class LeaderboardEvaluator(object):
         else:
             self.world.wait_for_tick()
 
-        if CarlaDataProvider.get_map().name != town:
+        if CarlaDataProvider.get_map().name.rsplit('/', 1)[-1] != town:
             raise Exception("The CARLA server uses the wrong map!"
                             "This scenario requires to use map {}".format(town))
 
@@ -248,6 +251,8 @@ class LeaderboardEvaluator(object):
         print("\033[1m> Registering the route statistics\033[0m")
         self.statistics_manager.save_record(current_stats_record, config.index, checkpoint)
         self.statistics_manager.save_entry_status(entry_status, False, checkpoint)
+        if self.research_six_camera:
+            save_research_metadata(checkpoint, self.sensors or [], self.research_agent_metadata)
       
         return current_stats_record
 
@@ -288,13 +293,15 @@ class LeaderboardEvaluator(object):
             else:
                 self.agent_instance = getattr(self.module_agent, agent_class_name)(args.agent_config, route_date_string)
             config.agent = self.agent_instance
+            self.research_agent_metadata = getattr(self.agent_instance, 'evaluation_metadata', None)
 
             # Check and store the sensors
             if not self.sensors:
                 self.sensors = self.agent_instance.sensors()
                 track = self.agent_instance.track
 
-                AgentWrapper.validate_sensor_configuration(self.sensors, track, args.track)
+                AgentWrapper.validate_sensor_configuration(
+                    self.sensors, track, args.track, research_six_camera=self.research_six_camera)
 
                 self.sensor_icons = [sensors_to_icons[sensor['type']] for sensor in self.sensors]
                 self.statistics_manager.save_sensors(self.sensor_icons, args.checkpoint)
@@ -443,6 +450,8 @@ class LeaderboardEvaluator(object):
         print("\033[1m> Registering the global statistics\033[0m")
         global_stats_record = self.statistics_manager.compute_global_statistics(route_indexer.total)
         StatisticsManager.save_global_record(global_stats_record, self.sensor_icons, route_indexer.total, args.checkpoint)
+        if self.research_six_camera:
+            save_research_metadata(args.checkpoint, self.sensors or [], self.research_agent_metadata)
 
 
 def main():
@@ -480,6 +489,8 @@ def main():
     parser.add_argument("--agent-config", type=str, help="Path to Agent's configuration file", default="")
 
     parser.add_argument("--track", type=str, default='SENSORS', help="Participation track: SENSORS, MAP")
+    parser.add_argument('--research-six-camera', action='store_true',
+                        help='Allow the existing VADv2 six RGB cameras for research; not official LB1 sensor rules')
     parser.add_argument('--resume', type=bool, default=False, help='Resume execution from last checkpoint?')
     parser.add_argument("--checkpoint", type=str,
                         default='./simulation_results.json',
