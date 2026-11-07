@@ -46,6 +46,7 @@ from srunner.scenariomanager.scenarioatomics.atomic_criteria_local import (Colli
 
 from leaderboard.utils.route_parser import RouteParser, TRIGGER_THRESHOLD, TRIGGER_ANGLE_THRESHOLD
 from leaderboard.utils.route_manipulation import interpolate_trajectory
+from leaderboard.utils.ego_vehicle import ego_vehicle_blueprint
 
 ROUTESCENARIO = ["RouteScenario"]
 
@@ -247,7 +248,7 @@ class RouteScenario(BasicScenario):
         elevate_transform = self.route[0][0]
         elevate_transform.location.z += 0.5
 
-        ego_vehicle = CarlaDataProvider.request_new_actor('vehicle.lincoln.mkz_2017',
+        ego_vehicle = CarlaDataProvider.request_new_actor(ego_vehicle_blueprint(),
                                                           elevate_transform,
                                                           rolename='hero')
 
@@ -389,7 +390,7 @@ class RouteScenario(BasicScenario):
             scenario_configuration.other_actors = list_of_actor_conf_instances
             scenario_configuration.trigger_points = [egoactor_trigger_position]
             scenario_configuration.subtype = definition['scenario_type']
-            scenario_configuration.ego_vehicles = [ActorConfigurationData('vehicle.lincoln.mkz_2017',
+            scenario_configuration.ego_vehicles = [ActorConfigurationData(ego_vehicle_blueprint(),
                                                                           ego_vehicle.get_transform(),
                                                                           'hero')]
             route_var_name = "ScenarioRouteNumber{}".format(scenario_number)

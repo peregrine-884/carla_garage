@@ -1,5 +1,6 @@
 """Attach research provenance without changing route records or score values."""
 from leaderboard.utils.checkpoint_tools import fetch_dict, save_dict
+from leaderboard.utils.ego_vehicle import ego_vehicle_blueprint
 
 
 def save_research_metadata(endpoint, sensors, agent_metadata=None):
@@ -11,6 +12,7 @@ def save_research_metadata(endpoint, sensors, agent_metadata=None):
         official_rgb_camera_limit=4,
         research_rgb_camera_limit=6,
         sensors_requested=sensors,
+        ego_vehicle=ego_vehicle_blueprint(),
     )
     data['evaluation_metadata'] = metadata
     save_dict(endpoint, data)
