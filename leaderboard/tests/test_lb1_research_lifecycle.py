@@ -73,6 +73,51 @@ class ResearchSensorTests(unittest.TestCase):
         world.tick.assert_not_called()
 
 
+class BlueprintAttributeTests(unittest.TestCase):
+    """Explicit blueprint_attributes override the leaderboard's camera/GNSS defaults (collection-matched rigs)."""
+
+    def setup(self, spec):
+        world = Mock()
+        world.spawn_actor.return_value = Mock()
+        blueprint = world.get_blueprint_library.return_value.find.return_value
+        agent = Mock()
+        agent.sensors.return_value = [spec]
+        wrapper = AgentWrapper(agent)
+        with patch.object(CarlaDataProvider, 'get_world', return_value=world):
+            wrapper.setup_sensors(Mock())
+        return blueprint
+
+    def test_camera_lens_defaults_are_overridden_after_the_leaderboard_values(self):
+        spec = dict(cameras()[0], blueprint_attributes={
+            'lens_circle_multiplier': 0.0, 'lens_circle_falloff': 5.0, 'chromatic_aberration_intensity': 0.0})
+        calls = [c.args for c in self.setup(spec).set_attribute.call_args_list]
+        self.assertLess(calls.index(('lens_circle_multiplier', '3.0')), calls.index(('lens_circle_multiplier', '0.0')))
+        self.assertEqual([v for k, v in calls if k == 'chromatic_aberration_intensity'][-1], '0.0')
+        self.assertEqual([v for k, v in calls if k == 'lens_circle_falloff'][-1], '5.0')
+
+    def test_gnss_noise_can_be_disabled(self):
+        spec = {'id': 'GPS', 'type': 'sensor.other.gnss', 'x': 0., 'y': 0., 'z': 0., 'roll': 0., 'pitch': 0., 'yaw': 0.,
+                'blueprint_attributes': {'noise_lat_stddev': 0.0, 'noise_lon_stddev': 0.0, 'noise_alt_stddev': 0.0}}
+        calls = [c.args for c in self.setup(spec).set_attribute.call_args_list]
+        self.assertEqual([v for k, v in calls if k == 'noise_lat_stddev'][-1], '0.0')
+
+    def test_without_the_key_the_official_defaults_stay(self):
+        calls = [c.args for c in self.setup(cameras()[0]).set_attribute.call_args_list]
+        self.assertEqual([v for k, v in calls if k == 'lens_circle_multiplier'], ['3.0'])
+
+    def test_unknown_attribute_is_rejected(self):
+        world = Mock()
+        blueprint = world.get_blueprint_library.return_value.find.return_value
+        blueprint.has_attribute.return_value = False
+        agent = Mock()
+        agent.sensors.return_value = [dict(cameras()[0], blueprint_attributes={'lens_circel_multiplier': 0})]
+        wrapper = AgentWrapper(agent)
+        with patch.object(CarlaDataProvider, 'get_world', return_value=world):
+            with self.assertRaisesRegex(SensorConfigurationInvalid, 'lens_circel_multiplier'):
+                wrapper.setup_sensors(Mock())
+        world.spawn_actor.assert_not_called()
+
+
 class ScenarioCleanupTests(unittest.TestCase):
     def manager(self, status=True):
         manager = ScenarioManager.__new__(ScenarioManager)

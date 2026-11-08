@@ -190,6 +190,16 @@ class AgentWrapper(object):
                 # create sensor
                 if 'sensor_tick' in sensor_spec:
                     bp.set_attribute('sensor_tick', str(sensor_spec['sensor_tick']))
+                # Explicit blueprint attributes override the leaderboard defaults above (lens circle, chromatic
+                # aberration, GNSS/IMU noise). Research agents use this to spawn the sensor model of their training
+                # collection, whose wrapper sets none of these (CARLA defaults: lens_circle_multiplier 0,
+                # lens_circle_falloff 5, chromatic_aberration_intensity 0, no GNSS/IMU noise). Agents that do not
+                # pass the key keep the official behaviour.
+                for key, value in sensor_spec.get('blueprint_attributes', {}).items():
+                    if not bp.has_attribute(str(key)):
+                        raise SensorConfigurationInvalid(
+                            "{} has no blueprint attribute {}".format(sensor_spec['type'], key))
+                    bp.set_attribute(str(key), str(value))
                 sensor_transform = carla.Transform(sensor_location, sensor_rotation)
                 sensor = CarlaDataProvider.get_world().spawn_actor(bp, sensor_transform, vehicle)
             # setup callback
