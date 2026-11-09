@@ -10,7 +10,9 @@ This module provides Challenge routes as standalone scenarios
 
 from __future__ import print_function
 
+import json
 import math
+import os
 import xml.etree.ElementTree as ET
 import numpy.random as random
 
@@ -194,6 +196,11 @@ class RouteScenario(BasicScenario):
             timeout=self.timeout,
             debug_mode=debug_mode > 1)
 
+        # Research: LB1_SCENARIO_LOG=<path> writes the scenarios placed on this route (sampled definitions and the
+        # instances that were built) for the analysis; it does not change what runs.
+        if os.environ.get('LB1_SCENARIO_LOG'):
+            self._write_scenario_log(os.environ['LB1_SCENARIO_LOG'], config)
+
         super(RouteScenario, self).__init__(name=config.name,
                                             ego_vehicles=[ego_vehicle],
                                             config=config,
@@ -371,6 +378,18 @@ class RouteScenario(BasicScenario):
                 sampled_scenarios.append(scenario_choice)
 
         return sampled_scenarios
+
+    def _write_scenario_log(self, path, config):
+        sampled = [{'name': d['name'], 'scenario_type': d['scenario_type'],
+                    'trigger': {k: float(d['trigger_position'][k]) for k in ('x', 'y', 'z', 'yaw')}}
+                   for d in (self.sampled_scenarios_definitions or [])]
+        record = {'route': config.name, 'town': config.town, 'sampled': sampled,
+                  'instances': [type(s).__name__ for s in self.list_scenarios]}
+        try:
+            with open(path, 'w') as handle:
+                json.dump(record, handle, indent=1)
+        except OSError as error:
+            print("Could not write the scenario log {}: {}".format(path, error))
 
     def _build_scenario_instances(self,
                                   world,
