@@ -86,12 +86,10 @@ class LeaderboardEvaluator(object):
             self.client_timeout = float(args.timeout)
         self.client.set_timeout(self.client_timeout)
 
-        try:
-            self.world = self.client.load_world('Town01')
-        except RuntimeError:
-            # For cases where load_world crashes, but the world was properly
-            # loaded anyways
-            self.world = self.client.get_world()
+        # No load_world('Town01') here: every route loads its own town in _load_and_run_scenario, and two world
+        # loads in one client process are the suspected cause of the evaluator's segfaults during the world load
+        # (rc -11 before the first tick; TSUBAME 2026-11-10, 4 of 12 attempts; locally seen on consecutive loads).
+        self.world = self.client.get_world()
         self.traffic_manager = self.client.get_trafficmanager(int(args.trafficManagerPort))
 
         dist = pkg_resources.get_distribution("carla")
