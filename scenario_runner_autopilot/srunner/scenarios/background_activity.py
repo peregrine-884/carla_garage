@@ -9,6 +9,7 @@ Scenario spawning elements to make the town dynamic and interesting
 """
 
 from collections import OrderedDict
+import os
 import py_trees
 
 import carla
@@ -48,6 +49,24 @@ def get_lane_key_from_ids(road_id, lane_id):
 
 
 # Debug variables
+def background_attribute_filter(default):
+    """
+    Blueprint attribute filter of the background vehicles.
+
+    Research switch BACKGROUND_VEHICLE_TYPES (environment variable):
+      unset / 'car' : the given default (cars with lights; the behaviour before this switch existed)
+      'all'         : no filter, i.e. any 'vehicle.*' blueprint (trucks, vans, buses, two-wheelers, emergency
+                      vehicles), as the Leaderboard 1.0 route scenario spawns its background traffic
+    Scenario actors (ActorFlow etc.) are not affected.
+    """
+    mode = os.environ.get('BACKGROUND_VEHICLE_TYPES', 'car').strip().lower()
+    if mode in ('', 'car'):
+        return default
+    if mode == 'all':
+        return None
+    raise ValueError("BACKGROUND_VEHICLE_TYPES must be 'car' or 'all', got '{}'".format(mode))
+
+
 DEBUG_ROAD = 'road'
 DEBUG_OPPOSITE = 'opposite'
 DEBUG_JUNCTION = 'junction'
@@ -180,7 +199,8 @@ class BackgroundBehavior(AtomicBehavior):
         self._tm.global_percentage_speed_difference(0.0)
         self._rng = CarlaDataProvider.get_random_seed()
 
-        self._attribute_filter = {'base_type': 'car', 'special_type': '', 'has_lights': True, }
+        self._attribute_filter = background_attribute_filter(
+            {'base_type': 'car', 'special_type': '', 'has_lights': True, })
 
         # Global variables
         self._ego_actor = ego_actor
@@ -2129,7 +2149,7 @@ class BackgroundBehavior(AtomicBehavior):
 
         actor = CarlaDataProvider.request_new_actor(
             'vehicle.*', spawn_transform, 'background', True,
-            attribute_filter={'base_type': 'car', 'has_lights': True}, tick=False
+            attribute_filter=background_attribute_filter({'base_type': 'car', 'has_lights': True}), tick=False
         )
 
         if not actor:
