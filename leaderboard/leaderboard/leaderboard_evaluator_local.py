@@ -91,6 +91,12 @@ class LeaderboardEvaluator(object):
         # (rc -11 before the first tick; TSUBAME 2026-11-10, 4 of 12 attempts; locally seen on consecutive loads).
         self.world = self.client.get_world()
         self.traffic_manager = self.client.get_trafficmanager(int(args.trafficManagerPort))
+        # Synchronous TM from the start (as the collection evaluator does): an asynchronous TM runs its own loop in this
+        # process (TrafficManagerLocal::Run -> World::GetSnapshot) and segfaults on the null episode while
+        # load_world swaps the episode (gdb, 2026-11-12: 4 of 36 trials, every one in that thread; 0 of 12 with a
+        # synchronous TM). A synchronous TM waits for world.tick(), so it reads nothing during the load. Driving is
+        # unchanged: _load_and_wait_for_world sets the TM synchronous again before the first tick.
+        self.traffic_manager.set_synchronous_mode(True)
 
         dist = pkg_resources.get_distribution("carla")
         if dist.version != 'leaderboard':
@@ -334,6 +340,7 @@ class LeaderboardEvaluator(object):
         print("\033[1m> Loading the world\033[0m")
 
         # Load the world and the scenario
+        self.traffic_manager.set_synchronous_mode(True)  # see __init__ (_cleanup sets it asynchronous after a route)
         try:
             self.world = self.client.load_world(config.town)
         except RuntimeError:
