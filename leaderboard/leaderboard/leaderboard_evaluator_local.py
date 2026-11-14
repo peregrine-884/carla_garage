@@ -90,13 +90,15 @@ class LeaderboardEvaluator(object):
         # loads in one client process are the suspected cause of the evaluator's segfaults during the world load
         # (rc -11 before the first tick; TSUBAME 2026-11-10, 4 of 12 attempts; locally seen on consecutive loads).
         self.world = self.client.get_world()
-        self.traffic_manager = self.client.get_trafficmanager(int(args.trafficManagerPort))
-        # Synchronous TM from the start (as the collection evaluator does): an asynchronous TM runs its own loop in this
-        # process (TrafficManagerLocal::Run -> World::GetSnapshot) and segfaults on the null episode while
-        # load_world swaps the episode (gdb, 2026-11-12: 4 of 36 trials, every one in that thread; 0 of 12 with a
-        # synchronous TM). A synchronous TM waits for world.tick(), so it reads nothing during the load. Driving is
-        # unchanged: _load_and_wait_for_world sets the TM synchronous again before the first tick.
-        self.traffic_manager.set_synchronous_mode(True)
+        # No traffic manager yet: it is created in _load_and_wait_for_world, AFTER the route's town is loaded. A traffic
+        # manager keeps the map of the world it was created in; load_world does not update it, and
+        # get_trafficmanager() on the same port returns that same instance. Created here (server still on its start-up
+        # map), it steered the background vehicles of every other town by the wrong map: 19-23 of 30 vehicles were
+        # more than 1.5 m off their lane within 8 s in Town01 / Town03 / Town05, 0 of 30 when it is created after
+        # load_world (workspace outputs/eval_debug/20261114_lb1_background_traffic/tm_probe.py, 2026-11-14).
+        # This also keeps the earlier fix: without a traffic manager there is no TrafficManagerLocal::Run thread that
+        # could read the null episode while load_world swaps it (the evaluator's segfault before the first tick).
+        self.traffic_manager = None
 
         dist = pkg_resources.get_distribution("carla")
         if dist.version != 'leaderboard':
@@ -152,7 +154,8 @@ class LeaderboardEvaluator(object):
             settings.synchronous_mode = False
             settings.fixed_delta_seconds = None
             self.world.apply_settings(settings)
-            self.traffic_manager.set_synchronous_mode(False)
+            if self.traffic_manager is not None:
+                self.traffic_manager.set_synchronous_mode(False)
 
         if self.manager:
             self.manager.cleanup()
@@ -226,6 +229,8 @@ class LeaderboardEvaluator(object):
         CarlaDataProvider.set_world(self.world)
         CarlaDataProvider.set_traffic_manager_port(int(args.trafficManagerPort))
 
+        # created for this world (see __init__); _load_and_run_scenario shut the previous route's one down
+        self.traffic_manager = self.client.get_trafficmanager(int(args.trafficManagerPort))
         self.traffic_manager.set_synchronous_mode(True)
         self.traffic_manager.set_random_device_seed(int(args.trafficManagerSeed))
 
@@ -340,7 +345,9 @@ class LeaderboardEvaluator(object):
         print("\033[1m> Loading the world\033[0m")
 
         # Load the world and the scenario
-        self.traffic_manager.set_synchronous_mode(True)  # see __init__ (_cleanup sets it asynchronous after a route)
+        if self.traffic_manager is not None:  # a previous route's: it holds that route's map (see __init__)
+            self.traffic_manager.shut_down()
+            self.traffic_manager = None
         try:
             self.world = self.client.load_world(config.town)
         except RuntimeError:
