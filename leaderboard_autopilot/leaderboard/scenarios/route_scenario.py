@@ -492,7 +492,12 @@ class RouteScenario(BasicScenario):
             if config.town not in TOWN_TRAFFIC_AMOUNT:
                 raise ValueError("BACKGROUND_TRAFFIC=town has no vehicle amount for {}".format(config.town))
             base_amount = TOWN_TRAFFIC_AMOUNT[config.town]
-            amount = random.randint(base_amount, 2 * base_amount)
+            # The amount, the spawn points and the blueprints come from generators seeded here with the route's
+            # traffic manager seed: the module-level `random` state at this point differed between two runs of the
+            # same route and seed (138 and 194 vehicles in Town03, workspace PLAN.md 2026-11-21 23:1x).
+            seed = CarlaDataProvider._random_seed  # pylint: disable=protected-access
+            amount = random.Random(seed).randint(base_amount, 2 * base_amount)
+            CarlaDataProvider.set_random_seed(seed)
             new_actors = CarlaDataProvider.request_new_batch_actors('vehicle.*',
                                                                     amount,
                                                                     carla.Transform(),
