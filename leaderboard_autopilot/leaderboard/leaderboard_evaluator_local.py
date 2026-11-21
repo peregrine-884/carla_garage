@@ -30,7 +30,7 @@ from srunner.scenariomanager.timer import GameTime
 from srunner.scenariomanager.watchdog import Watchdog
 
 from leaderboard.scenarios.scenario_manager_local import ScenarioManager
-from leaderboard.scenarios.route_scenario import RouteScenario
+from leaderboard.scenarios.route_scenario import RouteScenario, background_traffic_mode
 from leaderboard.envs.sensor_interface import SensorConfigurationInvalid
 from leaderboard.autoagents.agent_wrapper_local import AgentError, validate_sensor_configuration
 from leaderboard.utils.statistics_manager_local import StatisticsManager, FAILURE_MESSAGES
@@ -277,6 +277,16 @@ class LeaderboardEvaluator(object):
         settings.tile_stream_distance = 650
         settings.actor_active_distance = 650
         self.world.apply_settings(settings)
+
+        if background_traffic_mode() == 'town':
+            # A traffic manager keeps the map of the world it was created in (load_world does not update it), and
+            # the one of _setup_simulation was created on the server's start-up map. The town-wide background
+            # vehicles are steered by it alone, so it is recreated here for the loaded town, without the hybrid
+            # physics mode, as in the Leaderboard 1.0 evaluator (leaderboard_1-research branch, 744606d).
+            self.traffic_manager.shut_down()
+            self.traffic_manager = self.client.get_trafficmanager(self.traffic_manager_port)
+            self.traffic_manager.set_synchronous_mode(True)
+            self.traffic_manager.set_hybrid_physics_mode(False)
 
         self.world.reset_all_traffic_lights()
         CarlaDataProvider.set_client(self.client)

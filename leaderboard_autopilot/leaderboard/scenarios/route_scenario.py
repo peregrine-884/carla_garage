@@ -14,6 +14,7 @@ from __future__ import print_function
 import glob
 import json
 import os
+import random
 import sys
 import importlib
 import inspect
@@ -48,6 +49,42 @@ from leaderboard.utils.route_parser import RouteParser, DIST_THRESHOLD
 from leaderboard.utils.route_manipulation import interpolate_trajectory
 
 import leaderboard.utils.parked_vehicles as parked_vehicles
+
+# Background vehicles per town of the Leaderboard 1.0 route scenario (its default branch, no BENCHMARK set): the
+# number placed is random.randint(amount, 2 * amount). Copied from the leaderboard_1-research branch of this fork,
+# leaderboard/leaderboard/scenarios/route_scenario_local.py.
+TOWN_TRAFFIC_AMOUNT = {
+    'Town01': 130,
+    'Town02': 60,
+    'Town03': 135,
+    'Town04': 190,
+    'Town05': 120,
+    'Town06': 155,
+    'Town07': 60,
+    'Town08': 180,
+    'Town09': 300,
+    'Town10HD': 80,
+}
+
+
+def background_traffic_mode():
+    """
+    How the background traffic of a route is created.
+
+    Research switch BACKGROUND_TRAFFIC (environment variable):
+      unset / 'around_ego' : the Background Activity of Leaderboard 2.0, which keeps vehicles around the ego
+                             (the behaviour before this switch existed)
+      'town'               : as the Leaderboard 1.0 route scenario: a fixed number of Traffic Manager vehicles of
+                             any 'vehicle.*' blueprint on random spawn points of the whole town, and no Background
+                             Activity. For routes without scenarios (the scenarios rely on the Background Activity).
+    The evaluator recreates the traffic manager after the town is loaded in this mode (leaderboard_evaluator_local).
+    """
+    mode = os.environ.get('BACKGROUND_TRAFFIC', 'around_ego').strip().lower()
+    if mode in ('', 'around_ego'):
+        return 'around_ego'
+    if mode == 'town':
+        return 'town'
+    raise ValueError("BACKGROUND_TRAFFIC must be 'around_ego' or 'town', got '{}'".format(mode))
 
 
 class RouteScenario(BasicScenario):
@@ -448,6 +485,27 @@ class RouteScenario(BasicScenario):
         """
         Set other_actors to the superset of all scenario actors
         """
+        if background_traffic_mode() == 'town':
+            if config.scenario_configs:
+                raise ValueError("BACKGROUND_TRAFFIC=town is for routes without scenarios, this route has {}".format(
+                    len(config.scenario_configs)))
+            if config.town not in TOWN_TRAFFIC_AMOUNT:
+                raise ValueError("BACKGROUND_TRAFFIC=town has no vehicle amount for {}".format(config.town))
+            base_amount = TOWN_TRAFFIC_AMOUNT[config.town]
+            amount = random.randint(base_amount, 2 * base_amount)
+            new_actors = CarlaDataProvider.request_new_batch_actors('vehicle.*',
+                                                                    amount,
+                                                                    carla.Transform(),
+                                                                    autopilot=True,
+                                                                    random_location=True,
+                                                                    rolename='background')
+            if new_actors is None:
+                raise Exception("Error: Unable to add the background activity, all spawn points were occupied")
+            new_actors = [actor for actor in new_actors if actor is not None]
+            print("BACKGROUND_TRAFFIC=town: {} requested (base {}), {} spawned in {}".format(
+                amount, base_amount, len(new_actors), config.town), flush=True)
+            self.other_actors.extend(new_actors)
+
         # Add all the actors of the specific scenarios to self.other_actors
         for scenario in self.list_scenarios:
             self.other_actors.extend(scenario.other_actors)
@@ -478,8 +536,9 @@ class RouteScenario(BasicScenario):
         # register var
         self.scenario_triggerer = scenario_triggerer
 
-        # Add the Background Activity
-        behavior.add_child(BackgroundBehavior(self.ego_vehicles[0], self.route, name="BackgroundActivity"))
+        # Add the Background Activity (not in the town-wide mode, whose vehicles are placed in _initialize_actors)
+        if background_traffic_mode() == 'around_ego':
+            behavior.add_child(BackgroundBehavior(self.ego_vehicles[0], self.route, name="BackgroundActivity"))
 
         behavior.add_children(scenario_behaviors)
         return behavior
