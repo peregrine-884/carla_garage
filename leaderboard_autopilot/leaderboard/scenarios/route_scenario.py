@@ -68,8 +68,8 @@ TOWN_TRAFFIC_AMOUNT = {
 
 # Towns without a Leaderboard 1.0 amount (the large towns): vehicles are placed only around the route, at the density of
 # the Town05 evaluation. Town05 places random.randint(120, 240) vehicles; 120 = 0.40 x its 302 spawn points (the other
-# towns of the table: 0.36 - 0.59). Here base = ROUTE_AREA_SPAWN_SHARE x the spawn points within ROUTE_AREA_RADIUS_M of
-# the route, and random.randint(base, 2 * base) of those spawn points are used. The whole town at that share would be
+# towns of the table: 0.36 - 0.59). Here base = ROUTE_AREA_SPAWN_SHARE x the spawn places (duplicates counted once)
+# within ROUTE_AREA_RADIUS_M of the route, and random.randint(base, 2 * base) of those places are used. The whole town at that share would be
 # 4,000 - 5,000 vehicles in Town12 / Town13 (workspace PLAN.md 2026-11-22, restart item C6).
 ROUTE_AREA_TOWNS = ('Town12', 'Town13')
 ROUTE_AREA_RADIUS_M = 400.0
@@ -506,8 +506,15 @@ class RouteScenario(BasicScenario):
             seed = CarlaDataProvider._random_seed  # pylint: disable=protected-access
             if config.town in ROUTE_AREA_TOWNS:
                 along = [transform.location for transform, _ in self.route[::10]] + [self.route[-1][0].location]
-                area = [sp for sp in self.map.get_spawn_points()
-                        if min(sp.location.distance(p) for p in along) <= ROUTE_AREA_RADIUS_M]
+                # Town12 / Town13 list most spawn points twice at the same place (nearest other spawn point: median
+                # 0.0 m; Town05: 3.8 m). A place counts once and gets at most one vehicle (with the duplicates, 221 of
+                # 427 vehicles could be spawned in the first trial).
+                places, area = set(), []
+                for sp in self.map.get_spawn_points():
+                    key = (round(sp.location.x), round(sp.location.y), round(sp.location.z))
+                    if key not in places and min(sp.location.distance(p) for p in along) <= ROUTE_AREA_RADIUS_M:
+                        places.add(key)
+                        area.append(sp)
                 base_amount = int(round(ROUTE_AREA_SPAWN_SHARE * len(area)))
                 amount = random.Random(seed).randint(base_amount, 2 * base_amount)
                 CarlaDataProvider.set_random_seed(seed)
