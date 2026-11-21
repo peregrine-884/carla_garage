@@ -66,6 +66,15 @@ TOWN_TRAFFIC_AMOUNT = {
     'Town10HD': 80,
 }
 
+# Towns without a Leaderboard 1.0 amount (the large towns): vehicles are placed only around the route, at the density of
+# the Town05 evaluation. Town05 places random.randint(120, 240) vehicles; 120 = 0.40 x its 302 spawn points (the other
+# towns of the table: 0.36 - 0.59). Here base = ROUTE_AREA_SPAWN_SHARE x the spawn points within ROUTE_AREA_RADIUS_M of
+# the route, and random.randint(base, 2 * base) of those spawn points are used. The whole town at that share would be
+# 4,000 - 5,000 vehicles in Town12 / Town13 (workspace PLAN.md 2026-11-22, restart item C6).
+ROUTE_AREA_TOWNS = ('Town12', 'Town13')
+ROUTE_AREA_RADIUS_M = 400.0
+ROUTE_AREA_SPAWN_SHARE = 0.40
+
 
 def background_traffic_mode():
     """
@@ -489,26 +498,43 @@ class RouteScenario(BasicScenario):
             if config.scenario_configs:
                 raise ValueError("BACKGROUND_TRAFFIC=town is for routes without scenarios, this route has {}".format(
                     len(config.scenario_configs)))
-            if config.town not in TOWN_TRAFFIC_AMOUNT:
+            if config.town not in TOWN_TRAFFIC_AMOUNT and config.town not in ROUTE_AREA_TOWNS:
                 raise ValueError("BACKGROUND_TRAFFIC=town has no vehicle amount for {}".format(config.town))
-            base_amount = TOWN_TRAFFIC_AMOUNT[config.town]
             # The amount, the spawn points and the blueprints come from generators seeded here with the route's
             # traffic manager seed: the module-level `random` state at this point differed between two runs of the
             # same route and seed (138 and 194 vehicles in Town03, workspace PLAN.md 2026-11-21 23:1x).
             seed = CarlaDataProvider._random_seed  # pylint: disable=protected-access
-            amount = random.Random(seed).randint(base_amount, 2 * base_amount)
-            CarlaDataProvider.set_random_seed(seed)
-            new_actors = CarlaDataProvider.request_new_batch_actors('vehicle.*',
-                                                                    amount,
-                                                                    carla.Transform(),
-                                                                    autopilot=True,
-                                                                    random_location=True,
-                                                                    rolename='background')
+            if config.town in ROUTE_AREA_TOWNS:
+                along = [transform.location for transform, _ in self.route[::10]] + [self.route[-1][0].location]
+                area = [sp for sp in self.map.get_spawn_points()
+                        if min(sp.location.distance(p) for p in along) <= ROUTE_AREA_RADIUS_M]
+                base_amount = int(round(ROUTE_AREA_SPAWN_SHARE * len(area)))
+                amount = random.Random(seed).randint(base_amount, 2 * base_amount)
+                CarlaDataProvider.set_random_seed(seed)
+                CarlaDataProvider._rng.shuffle(area)  # pylint: disable=protected-access
+                new_actors = CarlaDataProvider.request_new_batch_actors('vehicle.*',
+                                                                        amount,
+                                                                        area[:amount],
+                                                                        autopilot=True,
+                                                                        random_location=False,
+                                                                        rolename='background')
+                where = "within {:.0f} m of the route ({} spawn points)".format(ROUTE_AREA_RADIUS_M, len(area))
+            else:
+                base_amount = TOWN_TRAFFIC_AMOUNT[config.town]
+                amount = random.Random(seed).randint(base_amount, 2 * base_amount)
+                CarlaDataProvider.set_random_seed(seed)
+                new_actors = CarlaDataProvider.request_new_batch_actors('vehicle.*',
+                                                                        amount,
+                                                                        carla.Transform(),
+                                                                        autopilot=True,
+                                                                        random_location=True,
+                                                                        rolename='background')
+                where = "over the town"
             if new_actors is None:
                 raise Exception("Error: Unable to add the background activity, all spawn points were occupied")
             new_actors = [actor for actor in new_actors if actor is not None]
-            print("BACKGROUND_TRAFFIC=town: {} requested (base {}), {} spawned in {}".format(
-                amount, base_amount, len(new_actors), config.town), flush=True)
+            print("BACKGROUND_TRAFFIC=town: {} requested (base {}), {} spawned in {} {}".format(
+                amount, base_amount, len(new_actors), config.town, where), flush=True)
             self.other_actors.extend(new_actors)
 
         # Add all the actors of the specific scenarios to self.other_actors
