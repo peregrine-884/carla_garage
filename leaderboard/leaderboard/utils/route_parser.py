@@ -9,6 +9,7 @@ Module used to parse all the route and scenario configuration parameters.
 from collections import OrderedDict
 import json
 import math
+import os
 import xml.etree.ElementTree as ET
 
 import carla
@@ -87,8 +88,15 @@ class RouteParser(object):
 
         route_weather = route.find("weather")
         if route_weather is None:
-
-            weather = carla.WeatherParameters(sun_altitude_angle=70, cloudiness=30)
+            # Research switch LB1_WEATHER (environment variable): the name of a carla.WeatherParameters preset
+            # (e.g. ClearNoon) for routes without a <weather> element. Unset: the Leaderboard 1.0 default below.
+            preset = os.environ.get('LB1_WEATHER', '').strip()
+            if preset:
+                weather = getattr(carla.WeatherParameters, preset, None)
+                if not isinstance(weather, carla.WeatherParameters):
+                    raise ValueError("LB1_WEATHER must name a carla.WeatherParameters preset, got '{}'".format(preset))
+            else:
+                weather = carla.WeatherParameters(sun_altitude_angle=70, cloudiness=30)
 
         else:
             weather = carla.WeatherParameters()
