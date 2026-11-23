@@ -270,7 +270,10 @@ class RouteScenario(BasicScenario):
         elevate_transform = self.route[0][0]
         elevate_transform.location.z += 0.5
 
-        ego_vehicle = CarlaDataProvider.request_new_actor('vehicle.nissan.micra',
+        # The ego model of the collection (carla-nuscenes-dataset-builder sets NUSCENES_EGO_VEHICLE_BLUEPRINT from the plan's
+        # ego_vehicle_blueprint). Unset: vehicle.nissan.micra, as before (2026-11-23: the official Bench2Drive rig records
+        # with vehicle.lincoln.mkz_2020, the model PDM-Lite's config.py ego extent was measured on).
+        ego_vehicle = CarlaDataProvider.request_new_actor(os.environ.get('NUSCENES_EGO_VEHICLE_BLUEPRINT') or 'vehicle.nissan.micra',
                                                           elevate_transform,
                                                           rolename='hero')
         if not ego_vehicle:
